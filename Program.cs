@@ -660,7 +660,7 @@ class MainForm : Form
         var workstation = Environment.MachineName;
 
         // 1. HANDSHAKE
-        SetSanitizeStatus("[1/5] Transmitiendo metadatos al inventario web (handshake)...", Color.DarkBlue);
+        SetSanitizeStatus("[1/4] Transmitiendo metadatos al inventario web (handshake)...", Color.DarkBlue);
         SetStatus("Handshake: registrando dispositivo en el panel web...");
 
         var handshakeBody = $"{{\"model\":{EscapeJson(model)},\"serialNumber\":{EscapeJson(serial)},\"vendor\":{EscapeJson(ExtractVendor(model))},\"storageType\":\"HDD\",\"technicianId\":{EscapeJson(techId)},\"workstation\":{EscapeJson(workstation)},\"status\":\"PENDING\"}}";
@@ -670,7 +670,7 @@ class MainForm : Form
         if (handshakeResponse != null)
         {
             sessionToken = ExtractJsonValue(handshakeResponse, "sessionToken") ?? "";
-            SetSanitizeStatus("[1/5] Handshake exitoso. Estado bloqueado como PENDING.", Color.Green);
+            SetSanitizeStatus("[1/4] Handshake exitoso. Estado bloqueado como PENDING.", Color.Green);
         }
         else
         {
@@ -680,7 +680,7 @@ class MainForm : Form
         }
 
         // 2. POLLING
-        SetSanitizeStatus("[2/5] AGENTE EN ESPERA: revise su panel web y presione ADOPTAR.", Color.DarkBlue);
+        SetSanitizeStatus("[2/4] AGENTE EN ESPERA: revise su panel web y presione ADOPTAR.", Color.DarkBlue);
         SetStatus($"Esperando autorizacion web para SN: {serial}...");
 
         int retry = 0;
@@ -715,7 +715,7 @@ class MainForm : Form
 
             if (!approved)
             {
-                SetSanitizeStatus($"[2/5] Consulta #{retry}/{maxRetries} | Estado: {lastStatus}", Color.DarkBlue);
+                SetSanitizeStatus($"[2/4] Consulta #{retry}/{maxRetries} | Estado: {lastStatus}", Color.DarkBlue);
                 SetStatus($"Esperando autorizacion web... SN: {serial} | Estado: {lastStatus}");
                 await Task.Delay(3000, ct);
             }
@@ -723,64 +723,41 @@ class MainForm : Form
 
         if (!approved && !ct.IsCancellationRequested)
         {
-            SetSanitizeStatus($"[2/5] Tiempo de espera agotado tras {maxRetries} intentos. Ultimo estado: {lastStatus}", Color.Red);
+            SetSanitizeStatus($"[2/4] Tiempo de espera agotado tras {maxRetries} intentos. Ultimo estado: {lastStatus}", Color.Red);
             SetStatus("Timeout: no se recibio autorizacion a tiempo.");
             return;
         }
 
         ct.ThrowIfCancellationRequested();
 
-        SetSanitizeStatus("[2/5] DIRECTIVA RECIBIDA - Ejecucion autorizada por el Ledger.", Color.Green);
+        SetSanitizeStatus("[2/4] DIRECTIVA RECIBIDA - Ejecucion autorizada por el Ledger.", Color.Green);
         SetStatus("Autorizacion web recibida. Ejecutando borrado...");
 
-        // 3. CLEAR-DISK
-        SetSanitizeStatus("[3/5] EJECUTANDO DIRECTIVA CLEAR-DISK...", Color.Red);
+        // 3+4. CLEAR-DISK + REINITIALIZE (combined para evitar estado inconsistente)
+        SetSanitizeStatus("[3/4] Limpiando y reinicializando disco...", Color.Red);
+        SetStatus("Borrando estructura sectorial y reconstruyendo tabla de particiones...");
         try
         {
+            var psCmd = $@"
+$disk = Get-Disk -Number {diskIndex} -ErrorAction Stop
+Clear-Disk -Number {diskIndex} -RemoveData -RemoveOEM -Confirm:$false -ErrorAction Stop
+Start-Sleep -Seconds 3
+Update-HostStorageCache -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+Set-Disk -Number {diskIndex} -IsOffline $false -ErrorAction SilentlyContinue
+Set-Disk -Number {diskIndex} -IsReadOnly $false -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+$disk2 = Get-Disk -Number {diskIndex} -ErrorAction Stop
+if ($disk2.PartitionStyle -eq 'RAW') {{
+    Initialize-Disk -Number {diskIndex} -PartitionStyle MBR -ErrorAction Stop
+}}
+Get-Partition -DiskNumber {diskIndex} -ErrorAction SilentlyContinue | Remove-Partition -Confirm:$false -ErrorAction SilentlyContinue
+$part = New-Partition -DiskNumber {diskIndex} -UseMaximumSize -AssignDriveLetter -ErrorAction Stop
+$part | Format-Volume -FileSystem {filesystem} -Confirm:$false -ErrorAction Stop
+" + @"Write-Host ""OK""" + @"
+";
             var psi = new ProcessStartInfo("powershell",
-                $"-NoProfile -Command \"Clear-Disk -Number {diskIndex} -RemoveData -RemoveOEM -Confirm:$false\"")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            using var proc = Process.Start(psi);
-            if (proc != null)
-            {
-                if (!proc.WaitForExit(60000))
-                {
-                    proc.Kill();
-                    SetSanitizeStatus("[3/5] Clear-Disk excedio el tiempo de espera (60s).", Color.Red);
-                    SetStatus("Timeout en Clear-Disk.");
-                    return;
-                }
-                if (proc.ExitCode != 0)
-                {
-                    var err = await proc.StandardError.ReadToEndAsync(ct);
-                    SetSanitizeStatus($"[3/5] Clear-Disk salio con codigo {proc.ExitCode}: {err.Trim()}", Color.Red);
-                    SetStatus("Fallo en Clear-Disk - el SO nego el control del bus de datos.");
-                    return;
-                }
-            }
-            SetSanitizeStatus("[3/5] Estructura sectorial fulminada con exito.", Color.Green);
-        }
-        catch (Exception ex)
-        {
-            SetSanitizeStatus($"[3/5] Fallo Clear-Disk: {ex.Message}", Color.Red);
-            SetStatus("Error critico en el borrado del disco.");
-            return;
-        }
-
-        // 4. REINITIALIZE DISK
-        SetSanitizeStatus("[4/5] Reconstruyendo tabla de particiones e inicializando disco...", Color.DarkBlue);
-        SetStatus("Inicializando disco para que el SO lo reconozca...");
-        try
-        {
-            var initCmd = $"Initialize-Disk -Number {diskIndex} -PartitionStyle MBR";
-            var formatCmd = $"New-Partition -DiskNumber {diskIndex} -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem {filesystem} -Confirm:$false";
-            var psi = new ProcessStartInfo("powershell",
-                $"-NoProfile -Command \"{initCmd}; {formatCmd}\"")
+                $"-NoProfile -Command \"{psCmd.Replace("\"", "\\\"").Replace("\n", ";").Replace("\r", "")}\"")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -793,28 +770,30 @@ class MainForm : Form
                 if (!proc.WaitForExit(120000))
                 {
                     proc.Kill();
-                    SetSanitizeStatus("[4/5] Init/format excedio el tiempo de espera (120s).", Color.Red);
-                    SetStatus("Timeout al inicializar el disco.");
-                }
-                else if (proc.ExitCode != 0)
-                {
                     var err = await proc.StandardError.ReadToEndAsync(ct);
-                    SetSanitizeStatus($"[4/5] Init/format salio con codigo {proc.ExitCode}: {err.Trim()}", Color.Red);
-                    SetStatus("Fallo al inicializar el disco - puede requerir formateo manual.");
+                    SetSanitizeStatus($"[3/4] El proceso excedio el tiempo de espera (120s). Stderr: {err.Trim()}", Color.Red);
+                    SetStatus("Timeout - el disco puede requerir inicializacion manual.");
+                    return;
                 }
-                else
+                var stderr = await proc.StandardError.ReadToEndAsync(ct);
+                if (proc.ExitCode != 0)
                 {
-                    SetSanitizeStatus($"[4/5] Disco inicializado y formateado {filesystem} listo para usar.", Color.Green);
+                    SetSanitizeStatus($"[3/4] Error (codigo {proc.ExitCode}): {stderr.Trim()}", Color.Red);
+                    SetStatus("Fallo - inicialice el disco manualmente con Administracion de Discos.");
+                    return;
                 }
             }
+            SetSanitizeStatus("[3/4] Disco limpiado, inicializado y formateado correctamente.", Color.Green);
         }
         catch (Exception ex)
         {
-            SetSanitizeStatus($"[4/5] Fallo al inicializar: {ex.Message}. Formateo manual requerido.", Color.DarkOrange);
+            SetSanitizeStatus($"[3/4] Error critico: {ex.Message}", Color.Red);
+            SetStatus("Fallo en el borrado/inicializacion del disco.");
+            return;
         }
 
-        // 5. CERTIFICATE
-        SetSanitizeStatus("[5/5] Despachando certificado criptografico inmutable...", Color.DarkBlue);
+        // 4. CERTIFICATE
+        SetSanitizeStatus("[4/4] Despachando certificado criptografico inmutable...", Color.DarkBlue);
         SetStatus("Registrando certificado de completitud...");
 
         var timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
