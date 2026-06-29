@@ -8,6 +8,7 @@
 #include <sstream>
 #include <algorithm>
 #include <ctime>
+#include <cstdlib>
 
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "bcrypt.lib")
@@ -83,7 +84,7 @@ DiskMetrics FetchHardwareTelemetry() {
     if (SUCCEEDED(hr)) {
         IWbemServices* pSvc = NULL;
         // Conectar al namespace de Storage de Windows
-        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\Microsoft\\Windows\\Storage"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\Microsoft\\Windows\\Storage"), NULL, NULL, 0L, 0L, NULL, NULL, &pSvc);
         
         if (SUCCEEDED(hr)) {
             hr = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
@@ -99,10 +100,10 @@ DiskMetrics FetchHardwareTelemetry() {
                 if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn > 0) {
                     VARIANT vtProp;
                     if (SUCCEEDED(pclsObj->Get(L"FriendlyName", 0, &vtProp, 0, 0)) && vtProp.vt == VT_BSTR)
-                        metrics.diskName = _bstr_t(vtProp.bstrVal);
+                        metrics.diskName = static_cast<const char*>(_bstr_t(vtProp.bstrVal));
                     
                     if (SUCCEEDED(pclsObj->Get(L"SerialNumber", 0, &vtProp, 0, 0)) && vtProp.vt == VT_BSTR) {
-                        std::string sn = _bstr_t(vtProp.bstrVal);
+                        std::string sn = static_cast<const char*>(_bstr_t(vtProp.bstrVal));
                         // Trim strings
                         sn.erase(sn.find_last_not_of(" \t\r\n") + 1);
                         if (!sn.empty()) metrics.serialNumber = sn;
@@ -119,8 +120,8 @@ DiskMetrics FetchHardwareTelemetry() {
 
                     if (SUCCEEDED(pclsObj->Get(L"Size", 0, &vtProp, 0, 0))) {
                         uint64_t rawSize = 0;
-                        if (vtProp.vt == VT_BSTR) rawSize = _stoull(_bstr_t(vtProp.bstrVal));
-                        else if (vtProp.vt == VT_UI8) rawSize = vtProp.uhVal.QuadPart;
+                        if (vtProp.vt == VT_BSTR) rawSize = std::strtoull(static_cast<const char*>(_bstr_t(vtProp.bstrVal)), nullptr, 10);
+                        else if (vtProp.vt == VT_UI8) rawSize = vtProp.ullVal;
                         if (rawSize > 0) metrics.capacity = std::to_string(rawSize / 1024 / 1024 / 1024) + " GB";
                     }
                     VariantClear(&vtProp);
@@ -139,7 +140,7 @@ DiskMetrics FetchHardwareTelemetry() {
                 if (SUCCEEDED(pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn)) && uReturn > 0) {
                     VARIANT vtProp;
                     if (SUCCEEDED(pclsObj->Get(L"PowerOnHours", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
-                        metrics.hours = (vtProp.vt == VT_UI8) ? (int)vtProp.uhVal.QuadPart : vtProp.lVal;
+                        metrics.hours = (vtProp.vt == VT_UI8) ? (int)vtProp.ullVal : vtProp.lVal;
                     }
                     if (SUCCEEDED(pclsObj->Get(L"Temperature", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL && vtProp.lVal > 0) {
                         metrics.temp = vtProp.lVal;
@@ -151,7 +152,7 @@ DiskMetrics FetchHardwareTelemetry() {
                         metrics.sectors = vtProp.lVal;
                     }
                     if (SUCCEEDED(pclsObj->Get(L"CumulativeBytesWritten", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL) {
-                        uint64_t bytes = (vtProp.vt == VT_UI8) ? vtProp.uhVal.QuadPart : _stoull(_bstr_t(vtProp.bstrVal));
+                        uint64_t bytes = (vtProp.vt == VT_UI8) ? vtProp.ullVal : std::strtoull(static_cast<const char*>(_bstr_t(vtProp.bstrVal)), nullptr, 10);
                         metrics.writtenTB = std::round((double)bytes / (1024.0 * 1024.0 * 1024.0 * 1024.0) * 100.0) / 100.0;
                     }
                     VariantClear(&vtProp);

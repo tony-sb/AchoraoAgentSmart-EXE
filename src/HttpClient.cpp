@@ -26,7 +26,7 @@ bool HttpClient::PostJson(const std::string& fullUrl, const std::string& jsonPay
         return false;
     }
 
-    hSession = WinHttpOpen(L"Achorao Native Agent v1.0.4/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_RESULT, 0);
+    hSession = WinHttpOpen(L"Achorao Native Agent v1.0.4/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (hSession) {
         hConnect = WinHttpConnect(hSession, wHostName, urlComp.nPort, 0);
     }
