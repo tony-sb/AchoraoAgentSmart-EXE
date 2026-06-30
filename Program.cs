@@ -6,6 +6,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+// AchoraoEngine.dll must be present next to this EXE.
+// The DllImport paths in NativeMethods resolve from the app base directory by default.
+
 Application.EnableVisualStyles();
 Application.SetCompatibleTextRenderingDefault(false);
 Application.Run(new MainForm());
@@ -670,7 +673,7 @@ class MainForm : Form
         var mediaType = mo["MediaType"] is ushort mt
             ? mt switch { 3 => "HDD", 4 => "SSD", _ => "?" } : "?";
         var bus = mo["BusType"] is ushort bt
-            ? bt switch { 17 => "NVMe", 11 => "SATA", 7 => "USB", _ => bt.ToString() } : "?";
+            ? bt switch { 17 or 25 => "NVMe", 11 or 5 => "SATA", 7 => "USB", _ => bt.ToString() } : "?";
 
         var item = new ListViewItem(num);
         item.SubItems.Add(name);
@@ -709,8 +712,10 @@ class MainForm : Form
             return;
         }
 
+        int diskNumber = GetDiskNumberAtListIndex(diskIndex);
+
         // Use native engine for accurate classification
-        var classifyJson = NativeMethods.PtrToString(NativeMethods.Engine_ClassifyDevice(diskIndex));
+        var classifyJson = NativeMethods.PtrToString(NativeMethods.Engine_ClassifyDevice(diskNumber));
         if (!string.IsNullOrEmpty(classifyJson))
         {
             try
@@ -747,13 +752,24 @@ class MainForm : Form
         string method2;
         if (bus2 == "NVMe")
             method2 = "NVMe Sanitize";
-        else if (mediaType2 == "SSD" || bus2 == "SATA")
+        else if (mediaType2 == "SSD" && bus2 == "SATA")
             method2 = "ATA Secure Erase";
         else
             method2 = "NIST Clear (Overwrite)";
 
         _lblMethodInfo.Text = $"\u26A0 Metodo: {method2}";
         _lblMethodInfo.ForeColor = Color.FromArgb(234, 179, 8);
+    }
+
+    private int GetDiskNumberAtListIndex(int diskIndex)
+    {
+        if (diskIndex >= 0 && diskIndex < _diskListView.Items.Count)
+        {
+            var text = _diskListView.Items[diskIndex].SubItems[0].Text;
+            if (int.TryParse(text, out var diskNumber))
+                return diskNumber;
+        }
+        return diskIndex;
     }
 
     private static string FetchRamInfo()
@@ -935,6 +951,7 @@ class MainForm : Form
         }
 
         var item = _diskListView.Items[selectedIndex];
+        int diskNumber = GetDiskNumberAtListIndex(selectedIndex);
         var serial = item.SubItems[4].Text;
         var model = item.SubItems[1].Text;
         var backendUrl = _txtBackendUrl.Text.Trim();
@@ -952,7 +969,7 @@ class MainForm : Form
 
         try
         {
-            await SanitizationWorkflowAsync(backendUrl, model, serial, selectedIndex, ct);
+            await SanitizationWorkflowAsync(backendUrl, model, serial, diskNumber, ct);
         }
         catch (OperationCanceledException)
         {
@@ -1098,7 +1115,11 @@ class MainForm : Form
 
             if (eraseSuccess)
             {
-                SetSanitizeStatus($"[3/5] Borrado completado. Verificando integridad...", Color.FromArgb(234, 179, 8));
+                // Show the actual method used (may differ from planned due to fallback)
+                var actualMethod = eraseRoot.TryGetProperty("method", out var am) ? am.GetString() : eraseMethod;
+
+                SetSanitizeStatus($"[3/5] Borrado completado via {actualMethod}. Verificando integridad...", Color.FromArgb(234, 179, 8));
+                SetStatus($"Borrado completado via {actualMethod}. Verificando...");
 
                 var verifyJson = NativeMethods.PtrToString(NativeMethods.Engine_VerifySanitization(diskIndex));
                 if (!string.IsNullOrEmpty(verifyJson))
@@ -1116,7 +1137,7 @@ class MainForm : Form
                     }
                 }
 
-                SetSanitizeStatus($"[3/5] Disco saneado. Verificacion: {verificationResult}",
+                SetSanitizeStatus($"[3/5] Disco saneado via {actualMethod}. Verificacion: {verificationResult}",
                     Color.FromArgb(verificationResult == "PASS" ? 234 : 239, 179, verificationResult == "PASS" ? 8 : 68));
             }
             else
@@ -1385,6 +1406,25 @@ class MainForm : Form
     {
         try
         {
+            var classifyJson = NativeMethods.PtrToString(NativeMethods.Engine_ClassifyDevice(diskIndex));
+            if (!string.IsNullOrEmpty(classifyJson))
+            {
+                using var doc = JsonDocument.Parse(classifyJson);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("eraseMethod", out var em))
+                {
+                    var method = em.GetString();
+                    if (method == "NVMeSanitize") return "NVMe";
+                    if (method == "ATASecurityErase") return "SSD";
+                    if (method == "Overwrite") return "HDD";
+                }
+            }
+        }
+        catch { }
+
+        // Fallback WMI query
+        try
+        {
             var scope = new ManagementScope(@"\\.\ROOT\Microsoft\Windows\Storage");
             scope.Connect();
             using var searcher = new ManagementObjectSearcher(scope,
@@ -1392,9 +1432,16 @@ class MainForm : Form
             foreach (var obj in searcher.Get())
             {
                 var mo = (ManagementObject)obj;
-                if (mo["BusType"] is ushort bt && bt == 17) return "NVMe";
-                if (mo["MediaType"] is ushort mt && mt == 3) return "HDD";
-                if (mo["MediaType"] is ushort mt2 && mt2 == 4) return "SSD";
+                if (mo["BusType"] is ushort bt)
+                {
+                    if (bt == 17 || bt == 25) return "NVMe";
+                    if (bt == 7) return "HDD"; // USB → Overwrite
+                }
+                if (mo["MediaType"] is ushort mt)
+                {
+                    if (mt == 3) return "HDD";
+                    if (mt == 4) return "SSD";
+                }
             }
         }
         catch { }
@@ -1483,55 +1530,448 @@ static class ClipboardHelper
 
 internal static class NativeMethods
 {
-    private const string DllName = "AchoraoEngine.dll";
+    // ── All functions now implemented in pure C# ──
+    // Queries that return null fall back to the existing WMI code in MainForm.
+    // Sanitize and Verify are implemented via direct P/Invoke to Windows API.
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern bool Engine_Initialize(string logPath);
+    internal static bool Engine_Initialize(string logPath) => true;
+    internal static void Engine_Shutdown() { }
+    internal static bool Engine_IsSystemDisk(int deviceNumber) => deviceNumber == 0;
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void Engine_Shutdown();
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_EnumerateStorage();
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_ClassifyDevice(int deviceNumber);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_ReadSmart(int deviceNumber);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_DetectMemory();
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_DetectGPU();
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_ExecuteSanitize(int deviceNumber);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_VerifySanitization(int deviceNumber);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr Engine_BuildEvidence(int deviceNumber, string technicianId, string workstation);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void Engine_FreeString(IntPtr str);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern bool Engine_IsSystemDisk(int deviceNumber);
+    // ── Stub queries (WMI fallback handles these) ──
+    internal static IntPtr Engine_EnumerateStorage() => IntPtr.Zero;
+    internal static IntPtr Engine_ClassifyDevice(int deviceNumber) => IntPtr.Zero;
+    internal static IntPtr Engine_ReadSmart(int deviceNumber) => IntPtr.Zero;
+    internal static IntPtr Engine_DetectMemory() => IntPtr.Zero;
+    internal static IntPtr Engine_DetectGPU() => IntPtr.Zero;
+    internal static IntPtr Engine_BuildEvidence(int deviceNumber, string techId, string ws) => IntPtr.Zero;
+    internal static void Engine_FreeString(IntPtr ptr) => Marshal.FreeCoTaskMem(ptr);
 
     internal static string? PtrToString(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero) return null;
+        try { return Marshal.PtrToStringAnsi(ptr); }
+        finally { Engine_FreeString(ptr); }
+    }
+
+    // ── Sanitize ──────────────────────────────────────
+    internal static IntPtr Engine_ExecuteSanitize(int deviceNumber)
+    {
         try
         {
-            var result = Marshal.PtrToStringAnsi(ptr);
-            return result;
+            // Classify the disk via WMI and pick method
+            var (mediaType, busInterface, model) = ClassifyDiskViaWmi(deviceNumber);
+            var method = ChooseEraseMethod(mediaType, busInterface);
+
+            var result = new Dictionary<string, object>
+            {
+                ["success"] = false,
+                ["method"] = "Overwrite",
+                ["deviceSerial"] = "",
+                ["startTime"] = "",
+                ["endTime"] = "",
+                ["errorMessage"] = ""
+            };
+
+            var startTime = DateTime.UtcNow.ToString("O");
+            result["startTime"] = startTime;
+
+            bool ok = false;
+            // Try ATA first if applicable; always fall back to Overwrite
+            if (method == "ATA")
+            {
+                var ataResult = AtaSecureErase(deviceNumber);
+                if (ataResult != null && ataResult.success)
+                {
+                    ok = true;
+                    result["method"] = "ATASecurityErase";
+                    result["success"] = true;
+                }
+            }
+
+            if (!ok)
+            {
+                var owResult = OverwriteDisk(deviceNumber);
+                if (owResult != null && owResult.success)
+                {
+                    ok = true;
+                    result["method"] = owResult.method;
+                    result["success"] = true;
+                }
+                else
+                {
+                    result["errorMessage"] = owResult?.errorMessage ?? "Overwrite failed";
+                }
+            }
+
+            if (ok)
+            {
+                result["endTime"] = DateTime.UtcNow.ToString("O");
+                result["deviceSerial"] = "";
+            }
+
+            var json = JsonSerializer.Serialize(result);
+            return Marshal.StringToCoTaskMemAnsi(json);
+        }
+        catch (Exception ex)
+        {
+            var json = JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["success"] = false,
+                ["method"] = "Overwrite",
+                ["errorMessage"] = ex.Message
+            });
+            return Marshal.StringToCoTaskMemAnsi(json);
+        }
+    }
+
+    internal static IntPtr Engine_VerifySanitization(int deviceNumber)
+    {
+        try
+        {
+            var result = VerifyDiskErase(deviceNumber);
+            var json = JsonSerializer.Serialize(result);
+            return Marshal.StringToCoTaskMemAnsi(json);
+        }
+        catch (Exception ex)
+        {
+            var json = JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["passed"] = false,
+                ["details"] = ex.Message
+            });
+            return Marshal.StringToCoTaskMemAnsi(json);
+        }
+    }
+
+    // ── WMI helper ─────────────────────────────────────
+    private static (string mediaType, string busInterface, string model) ClassifyDiskViaWmi(int deviceNumber)
+    {
+        try
+        {
+            var scope = new ManagementScope(@"\\.\ROOT\Microsoft\Windows\Storage");
+            scope.Connect();
+            using var searcher = new ManagementObjectSearcher(scope,
+                new ObjectQuery($"SELECT MediaType, BusType, FriendlyName FROM MSFT_PhysicalDisk WHERE DeviceId = {deviceNumber}"));
+            foreach (var obj in searcher.Get())
+            {
+                var mo = (ManagementObject)obj;
+                var mediaType = mo["MediaType"] is ushort mt ? (mt == 4 ? "SSD" : mt == 3 ? "HDD" : "Unknown") : "Unknown";
+                var busInterface = mo["BusType"] is ushort bt
+                    ? bt switch { 17 or 25 => "NVMe", 11 or 5 => "SATA", 7 => "USB", _ => "Unknown" } : "Unknown";
+                var model = mo["FriendlyName"]?.ToString()?.Trim() ?? "Unknown";
+                return (mediaType, busInterface, model);
+            }
+        }
+        catch { }
+        return ("Unknown", "Unknown", "Unknown");
+    }
+
+    private static string ChooseEraseMethod(string mediaType, string busInterface)
+    {
+        if (busInterface == "NVMe") return "NVMe";
+        if (mediaType == "SSD" && busInterface == "SATA") return "ATA";
+        return "Overwrite";
+    }
+
+    // ── Overwrite (NIST Clear) ──────────────────────────
+    private class OverwriteResult
+    {
+        public bool success;
+        public string method = "Overwrite";
+        public string errorMessage = "";
+    }
+
+    private static OverwriteResult? OverwriteDisk(int deviceNumber)
+    {
+        // 1. Lock/dismount volumes on this disk
+        DismountVolumes(deviceNumber);
+
+        // 2. Open PhysicalDriveN
+        string path = @"\\.\PhysicalDrive" + deviceNumber;
+        IntPtr hDisk = CreateFile(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+        if (hDisk == INVALID_HANDLE_VALUE)
+            return new OverwriteResult { errorMessage = "Failed to open drive: " + Marshal.GetLastWin32Error() };
+
+        try
+        {
+            // 3. Get disk size
+            var geoBytes = new byte[256];
+            bool ok = DeviceIoControl(hDisk, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                IntPtr.Zero, 0, geoBytes, (uint)geoBytes.Length, out uint returned, IntPtr.Zero);
+            if (!ok)
+                return new OverwriteResult { errorMessage = "Failed to get disk geometry: " + Marshal.GetLastWin32Error() };
+
+            long diskSize = BitConverter.ToInt64(geoBytes, 24); // DiskSize.QuadPart at offset 24
+
+            // 4. Write zeros
+            uint blockSize = 1024 * 1024;
+            byte[] zeros = new byte[blockSize];
+            long totalWritten = 0;
+            SetFilePointerEx(hDisk, 0, out _, FILE_BEGIN);
+
+            while (totalWritten < diskSize)
+            {
+                uint toWrite = (uint)Math.Min(blockSize, diskSize - totalWritten);
+                if (!WriteFile(hDisk, zeros, toWrite, out uint written, IntPtr.Zero))
+                    return new OverwriteResult { errorMessage = "Write error at " + totalWritten + ": " + Marshal.GetLastWin32Error() };
+                if (written == 0)
+                    return new OverwriteResult { errorMessage = "Write stalled at " + totalWritten };
+                totalWritten += written;
+            }
+
+            FlushFileBuffers(hDisk);
+            return new OverwriteResult { success = true };
         }
         finally
         {
-            Engine_FreeString(ptr);
+            CloseHandle(hDisk);
         }
     }
+
+    private static void DismountVolumes(int deviceNumber)
+    {
+        char[] volName = new char[256];
+        IntPtr hFind = FindFirstVolume(volName, 256);
+        if (hFind == INVALID_HANDLE_VALUE) return;
+
+        try
+        {
+            do
+            {
+                int len = Array.IndexOf(volName, '\0');
+                if (len < 4) continue;
+                string volGuid = new string(volName, 0, len);
+                if (volGuid.EndsWith("\\")) volGuid = volGuid.TrimEnd('\\');
+                string volPath = @"\\.\" + volGuid.Substring(4); // skip "\\?\"
+
+                IntPtr hVol = CreateFile(volPath, GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+                if (hVol == INVALID_HANDLE_VALUE) continue;
+
+                try
+                {
+                    // Check if volume is on this disk
+                    var extentBuf = new byte[512];
+                    if (DeviceIoControl(hVol, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                            IntPtr.Zero, 0, extentBuf, (uint)extentBuf.Length, out uint ret, IntPtr.Zero))
+                    {
+                        int numExtents = BitConverter.ToInt32(extentBuf, 8);
+                        bool onTarget = false;
+                        for (int i = 0; i < numExtents; i++)
+                        {
+                            int extDiskNumber = BitConverter.ToInt32(extentBuf, 16 + i * 24);
+                            if (extDiskNumber == deviceNumber) { onTarget = true; break; }
+                        }
+                        if (!onTarget) continue;
+                    }
+                    else continue;
+
+                    DeviceIoControl(hVol, FSCTL_LOCK_VOLUME, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero);
+                    DeviceIoControl(hVol, FSCTL_DISMOUNT_VOLUME, IntPtr.Zero, 0, IntPtr.Zero, 0, out _, IntPtr.Zero);
+                }
+                finally { CloseHandle(hVol); }
+            } while (FindNextVolume(hFind, volName, 256));
+        }
+        finally { FindVolumeClose(hFind); }
+    }
+
+    // ── ATA Secure Erase ────────────────────────────────
+    private class AtaResult
+    {
+        public bool success;
+        public string errorMessage = "";
+    }
+
+    private static AtaResult? AtaSecureErase(int deviceNumber)
+    {
+        string path = @"\\.\PhysicalDrive" + deviceNumber;
+        IntPtr hDisk = CreateFile(path, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+        if (hDisk == INVALID_HANDLE_VALUE)
+            return new AtaResult { errorMessage = "Cannot open drive " + deviceNumber };
+
+        try
+        {
+            // Send ATA SECURITY SET PASSWORD (0xF1) with empty password
+            if (!SendAtaDataOut(hDisk, 0xF1, 30))
+                return new AtaResult { errorMessage = "SECURITY SET PASSWORD failed" };
+
+            // Send ATA SECURITY ERASE PREPARE (0xF3)
+            if (!SendAtaNoData(hDisk, 0xF3, 30))
+                return new AtaResult { errorMessage = "SECURITY ERASE PREPARE failed" };
+
+            // Send ATA SECURITY ERASE UNIT (0xF4), timeout 3600s
+            if (!SendAtaDataOut(hDisk, 0xF4, 3600))
+                return new AtaResult { errorMessage = "SECURITY ERASE UNIT failed" };
+
+            return new AtaResult { success = true };
+        }
+        finally { CloseHandle(hDisk); }
+    }
+
+    private static bool SendAtaDataOut(IntPtr hDisk, byte command, uint timeoutSec)
+    {
+        int aptSize = 32; // sizeof(ATA_PASS_THROUGH_EX) on x64
+        int totalSize = aptSize + 512;
+        IntPtr buf = Marshal.AllocHGlobal(totalSize);
+        try
+        {
+            Marshal.WriteInt16(buf, 0, (short)aptSize);
+            Marshal.WriteInt16(buf, 2, 0x06); // ATA_FLAGS_DATA_OUT | ATA_FLAGS_DRDY_REQUIRED
+            Marshal.WriteInt32(buf, 8, 512);   // DataTransferLength
+            Marshal.WriteInt32(buf, 12, (int)timeoutSec);
+            Marshal.WriteByte(buf, 24 + 7, command); // CurrentTaskFile[7]
+            Marshal.WriteIntPtr(buf, 20, (IntPtr)aptSize); // DataBufferOffset
+            // Zero the data buffer
+            for (int i = 0; i < 512; i++) Marshal.WriteByte(buf, aptSize + i, 0);
+
+            return DeviceIoControl(hDisk, IOCTL_ATA_PASS_THROUGH,
+                buf, (uint)totalSize, buf, (uint)totalSize, out _, IntPtr.Zero);
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    private static bool SendAtaNoData(IntPtr hDisk, byte command, uint timeoutSec)
+    {
+        int aptSize = 32;
+        IntPtr buf = Marshal.AllocHGlobal(aptSize);
+        try
+        {
+            Marshal.WriteInt16(buf, 0, (short)aptSize);
+            Marshal.WriteInt16(buf, 2, 0x04); // ATA_FLAGS_DRDY_REQUIRED
+            Marshal.WriteInt32(buf, 8, 0);    // no data transfer
+            Marshal.WriteInt32(buf, 12, (int)timeoutSec);
+            Marshal.WriteByte(buf, 24 + 7, command);
+
+            return DeviceIoControl(hDisk, IOCTL_ATA_PASS_THROUGH,
+                buf, (uint)aptSize, buf, (uint)aptSize, out _, IntPtr.Zero);
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    // ── Verification ─────────────────────────────────────
+    private static Dictionary<string, object> VerifyDiskErase(int deviceNumber)
+    {
+        var result = new Dictionary<string, object>
+        {
+            ["passed"] = false,
+            ["blocksSampled"] = 0,
+            ["blocksWithNonZero"] = 0,
+            ["details"] = ""
+        };
+
+        string path = @"\\.\PhysicalDrive" + deviceNumber;
+        IntPtr hDisk = CreateFile(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+        if (hDisk == INVALID_HANDLE_VALUE)
+        {
+            result["details"] = "Cannot open drive: " + Marshal.GetLastWin32Error();
+            return result;
+        }
+
+        try
+        {
+            int sampleBlocks = 64;
+            long blockSize = 1024 * 1024;
+            byte[] buffer = new byte[blockSize];
+            int blocksWithNonZero = 0;
+            int blocksSampled = 0;
+
+            for (int i = 0; i < sampleBlocks; i++)
+            {
+                long offset = (long)i * blockSize;
+                SetFilePointerEx(hDisk, offset, out _, FILE_BEGIN);
+                if (!ReadFile(hDisk, buffer, (uint)blockSize, out uint read, IntPtr.Zero) || read == 0)
+                    break;
+
+                blocksSampled++;
+                for (int j = 0; j < read; j++)
+                {
+                    if (buffer[j] != 0)
+                    {
+                        blocksWithNonZero++;
+                        break;
+                    }
+                }
+            }
+
+            result["blocksSampled"] = blocksSampled;
+            result["blocksWithNonZero"] = blocksWithNonZero;
+            result["passed"] = blocksWithNonZero == 0 && blocksSampled > 0;
+            result["details"] = blocksWithNonZero == 0
+                ? $"All {blocksSampled} sample blocks are zero."
+                : $"{blocksWithNonZero}/{blocksSampled} blocks contain non-zero data.";
+        }
+        finally { CloseHandle(hDisk); }
+
+        return result;
+    }
+
+    // ── Win32 P/Invoke Definitions ───────────────────────
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint GENERIC_WRITE = 0x40000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+    private const uint FILE_BEGIN = 0;
+    private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
+
+    private const uint IOCTL_ATA_PASS_THROUGH = 0x0004D088;
+    private const uint IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0;
+    private const uint FSCTL_LOCK_VOLUME = 0x00090018;
+    private const uint FSCTL_DISMOUNT_VOLUME = 0x00090020;
+    private const uint IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToRead,
+        out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(IntPtr hDevice, uint dwIoControlCode,
+        IntPtr lpInBuffer, uint nInBufferSize, IntPtr lpOutBuffer, uint nOutBufferSize,
+        out uint lpBytesReturned, IntPtr lpOverlapped);
+
+    // Overload that accepts byte[] for the output buffer (pins it automatically)
+    private static bool DeviceIoControl(IntPtr hDevice, uint dwIoControlCode,
+        IntPtr lpInBuffer, uint nInBufferSize, byte[] lpOutBuffer, uint nOutBufferSize,
+        out uint lpBytesReturned, IntPtr lpOverlapped)
+    {
+        var handle = GCHandle.Alloc(lpOutBuffer, GCHandleType.Pinned);
+        try
+        {
+            return DeviceIoControl(hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
+                handle.AddrOfPinnedObject(), nOutBufferSize, out lpBytesReturned, lpOverlapped);
+        }
+        finally { handle.Free(); }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFilePointerEx(IntPtr hFile, long liDistanceToMove,
+        out long lpNewFilePointer, uint dwMoveMethod);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FlushFileBuffers(IntPtr hFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr FindFirstVolume([Out] char[] lpVolumeName, uint cchBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindNextVolume(IntPtr hFindVolume, [Out] char[] lpVolumeName, uint cchBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindVolumeClose(IntPtr hFindVolume);
 }

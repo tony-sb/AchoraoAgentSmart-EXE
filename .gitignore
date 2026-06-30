@@ -1,4 +1,24 @@
+# Build outputs
 bin/
 obj/
 publish/
-*.exe
+build_dll/
+build_probe/
+build_native/
+
+# Native artifacts (no longer used)
+*.obj
+*.lib
+*.exp
+*.dll
+*.pdb
+*.ilk
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE
+.vs/
+*.user
+*.suo
