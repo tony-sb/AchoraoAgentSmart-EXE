@@ -277,9 +277,9 @@ sudo apt install -y smartmontools hdparm nvme-cli
 | Problema | Causa | Solucion |
 |---|---|---|
 | `sudo: ./nist-wiper: command not found` | El archivo no esta en la carpeta actual | Usa `ls` para ver donde esta y `cd` a esa carpeta |
-| `nvme: command not found` | Falta `nvme-cli` | `sudo apt install nvme-cli` |
-| `hdparm: command not found` | Falta `hdparm` | `sudo apt install hdparm` |
-| `smartctl: command not found` | Falta `smartmontools` | `sudo apt install smartmontools` |
+| `nvme: command not found` | Falta `nvme-cli` | `sudo apt install nvme-cli` / `sudo pacman -S nvme-cli` |
+| `hdparm: command not found` | Falta `hdparm` | `sudo apt install hdparm` / `sudo pacman -S hdparm` |
+| `smartctl: command not found` | Falta `smartmontools` | `sudo apt install smartmontools` / `sudo pacman -S smartmontools` |
 | `_tkinter.TclError: no display name` | Sin servidor X | Usa VcXsrv o ejecuta en Linux con monitor |
 | La app no arranca (sin error) | No tienes permisos de ejecucion | `sudo chmod +x nist-wiper` |
 | "Disk is frozen" en ATA Secure Erase | La BIOS congelo el disco | Suspende/reanuda la PC o usa otro metodo |
