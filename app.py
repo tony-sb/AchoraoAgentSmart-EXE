@@ -88,6 +88,7 @@ class SanitizerApp(ctk.CTk):
         self.verification_done = False
         self.verification_passed = False
         self._missing_deps = []
+        self._raw_lsblk = ""
 
         self.title("NIST SP 800-88 - Disk Sanitization Tool")
         self.minsize(880, 700)
@@ -241,13 +242,14 @@ class SanitizerApp(ctk.CTk):
         threading.Thread(target=self._detect_disks, daemon=True).start()
 
     def _detect_disks(self):
+        self._raw_lsblk = ""
         try:
             r = subprocess.run(
                 ["lsblk", "-J", "-o", "NAME,SIZE,TYPE,MODEL,SERIAL,TRAN,ROTA,VENDOR"],
                 capture_output=True, text=True, timeout=20,
             )
             if r.returncode != 0:
-                # Intentar sin -J en sistemas viejos
+                # Intentar con columnas minimas
                 r = subprocess.run(
                     ["lsblk", "-J", "-o", "NAME,SIZE,TYPE"],
                     capture_output=True, text=True, timeout=10,
@@ -257,6 +259,7 @@ class SanitizerApp(ctk.CTk):
                     "Error lsblk", f"No se pudo ejecutar lsblk:\n{r.stderr}"))
                 self.after(0, self._render_step1)
                 return
+            self._raw_lsblk = r.stdout
             data = json.loads(r.stdout)
             self.disks = []
             for dev in data.get("blockdevices", []):
@@ -349,16 +352,35 @@ class SanitizerApp(ctk.CTk):
                 self.after(100, self._detect_disks_async)),
         ).pack(side="right")
         if not self.disks:
+            msg = "No se detectaron discos fisicos.\nVerifica conexiones y re-escannea.\n\n"
+            if sys.platform == "linux":
+                msg += "Si usas WSL2: los discos USB no son accesibles.\n"
+                msg += "Alternativas:\n"
+                msg += "  1. Bootea con Live USB (SystemRescue, Ubuntu Live)\n"
+                msg += "  2. Instala Linux nativo en la maquina\n"
+                msg += "  3. Usa usbipd-win para pasar USB a WSL2\n\n"
+            msg += "Diagnostico - ejecuta en terminal:\n  lsblk -J -o NAME,SIZE,TYPE,MODEL,SERIAL,TRAN,ROTA"
             ctk.CTkLabel(self.content,
-                text="No se detectaron discos fisicos.\n"
-                     "Verifica conexiones y re-escannea.\n\n"
-                     "Si usas WSL2: los discos USB no son accesibles.\n"
-                     "Prueba en Linux nativo o Live USB.\n\n"
-                     "Diagnostico desde terminal:\n"
-                     "  lsblk -J -o NAME,SIZE,TYPE,MODEL,SERIAL,TRAN,ROTA",
+                text=msg,
                 font=ctk.CTkFont(size=13), text_color=self.COL_WARN,
                 justify="left",
-            ).pack(pady=30, padx=20)
+            ).pack(pady=20, padx=20)
+            if self._raw_lsblk:
+                try:
+                    raw = json.loads(self._raw_lsblk)
+                    raw_str = json.dumps(raw, indent=2)
+                    ctk.CTkLabel(self.content,
+                        text="Salida cruda de lsblk (depuracion):",
+                        font=ctk.CTkFont(size=12, weight="bold"),
+                        text_color="#AAAAAA",
+                    ).pack(anchor="w", padx=20, pady=(10,2))
+                    txt = ctk.CTkTextbox(self.content, height=120, width=600,
+                        font=ctk.CTkFont(size=10, family="Consolas"))
+                    txt.pack(padx=20, pady=(0,10))
+                    txt.insert("0.0", raw_str)
+                    txt.configure(state="disabled")
+                except Exception:
+                    pass
             self._update_nav_buttons()
             return
         for disk in self.disks:
