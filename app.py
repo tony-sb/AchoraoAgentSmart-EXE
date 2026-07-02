@@ -247,6 +247,12 @@ class SanitizerApp(ctk.CTk):
                 capture_output=True, text=True, timeout=20,
             )
             if r.returncode != 0:
+                # Intentar sin -J en sistemas viejos
+                r = subprocess.run(
+                    ["lsblk", "-J", "-o", "NAME,SIZE,TYPE"],
+                    capture_output=True, text=True, timeout=10,
+                )
+            if r.returncode != 0:
                 self.after(0, lambda: self._show_error_popup(
                     "Error lsblk", f"No se pudo ejecutar lsblk:\n{r.stderr}"))
                 self.after(0, self._render_step1)
@@ -259,19 +265,27 @@ class SanitizerApp(ctk.CTk):
                 name = dev.get("name", "")
                 if name.startswith("loop") or name.startswith("ram"):
                     continue
+                if name.startswith("sr"):
+                    continue
                 rota = dev.get("rota")
+                tran = (dev.get("tran") or "").lower()
                 if name.startswith("nvme"):
                     dtype = "NVMe"
                 elif rota == "1":
                     dtype = "HDD"
+                elif tran == "usb":
+                    dtype = "SSD SATA"
                 else:
                     dtype = "SSD SATA"
                 serial = (dev.get("serial") or "").strip()
                 if not serial:
                     serial = self._smartctl_serial(name)
+                model = (dev.get("model") or "").strip()
+                if not model:
+                    model = self._smartctl_model(name)
                 self.disks.append({
                     "devpath": f"/dev/{name}", "devname": name,
-                    "model": (dev.get("model") or "").strip(),
+                    "model": model,
                     "serial": serial,
                     "size": dev.get("size", "N/A"),
                     "vendor": (dev.get("vendor") or "").strip(),
@@ -301,6 +315,20 @@ class SanitizerApp(ctk.CTk):
             pass
         return "No disponible"
 
+    def _smartctl_model(self, devname):
+        try:
+            r = subprocess.run(["smartctl", "-i", f"/dev/{devname}"],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    if "Device Model:" in line or "Model Number:" in line:
+                        return line.split(":", 1)[1].strip()
+                    if "Model Family:" in line:
+                        return line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+        return ""
+
     def _render_step1(self):
         self._clear_content()
         if self._missing_deps:
@@ -322,9 +350,15 @@ class SanitizerApp(ctk.CTk):
         ).pack(side="right")
         if not self.disks:
             ctk.CTkLabel(self.content,
-                text="No se detectaron discos fisicos.\nVerifica conexiones y re-escannea.",
-                font=ctk.CTkFont(size=14), text_color=self.COL_WARN,
-            ).pack(pady=40)
+                text="No se detectaron discos fisicos.\n"
+                     "Verifica conexiones y re-escannea.\n\n"
+                     "Si usas WSL2: los discos USB no son accesibles.\n"
+                     "Prueba en Linux nativo o Live USB.\n\n"
+                     "Diagnostico desde terminal:\n"
+                     "  lsblk -J -o NAME,SIZE,TYPE,MODEL,SERIAL,TRAN,ROTA",
+                font=ctk.CTkFont(size=13), text_color=self.COL_WARN,
+                justify="left",
+            ).pack(pady=30, padx=20)
             self._update_nav_buttons()
             return
         for disk in self.disks:
@@ -335,7 +369,6 @@ class SanitizerApp(ctk.CTk):
         sel = disk is self.selected_disk
         card = ctk.CTkFrame(parent, fg_color=self.COL_CARD_BG,
             border_color=self.COL_SEL if sel else self.COL_CARD_BD, border_width=2)
-        card.bind("<Button-1>", lambda e, d=disk: self._select_disk(d))
         icons = {"NVMe": "NVMe", "SSD SATA": "SSD", "HDD": "HDD"}
         icon = icons.get(disk["type"], "DISK")
         r0 = ctk.CTkFrame(card, fg_color="transparent")
@@ -358,6 +391,12 @@ class SanitizerApp(ctk.CTk):
             ctk.CTkLabel(r1, text=f"{k}: {v}",
                 font=ctk.CTkFont(size=12), text_color="#999999",
             ).pack(anchor="w")
+        # Vincular click a TODOS los widgets dentro de la tarjeta recursivamente
+        def _bind_click(w):
+            w.bind("<Button-1>", lambda e, d=disk: self._select_disk(d), add="+")
+            for c in w.winfo_children():
+                _bind_click(c)
+        _bind_click(card)
         return card
 
     def _select_disk(self, disk):

@@ -12,6 +12,12 @@ Disenada para operadores de TI que necesitan borrar discos de forma irreversible
 - **Puerto USB** para bootear (si usas Live USB)
 - **Disco a sanitizar** (HDD, SSD SATA o NVMe)
 
+### Limitaciones conocidas
+
+- **WSL2** no tiene acceso directo a discos USB externos. Para probar con discos reales, usa Linux nativo o Live USB.
+- **Discos USB externos**: pueden no reportar serial ni modelo via `smartctl` (limitacion del puente USB-SATA). La app los detecta igual pero mostrara "No disponible" en esos campos.
+- Si un disco no aparece, verifica desde terminal: `lsblk -J -o NAME,SIZE,TYPE,MODEL,SERIAL,TRAN,ROTA`
+
 ---
 
 ## Modo 1: Live USB (recomendado - sin instalacion)
@@ -146,20 +152,29 @@ winget install marha.VcXsrv
 
 #### Guia de Instalacion y Compilacion en WSL2
 
-Ejecuta los siguientes bloques directamente desde tu **consola de PowerShell** de Windows:
+Ejecuta los siguientes bloques en orden desde tu **PowerShell como Administrador**:
 
 ```powershell
 # ====== PASO 1: Instalar WSL2 (Una sola vez) ======
+wsl --install
+
+# === (REINICIAR EL SISTEMA) ===
+
+# ====== PASO 2: Instalar distribucion Ubuntu ======
 wsl --install -d Ubuntu-24.04
 
-# ====== PASO 2: Verificar instalacion ======
-wsl -d Ubuntu-24.04 whoami
+# Te pedira crear usuario y contrasena para Ubuntu.
+# Una vez creados, cierra y vuelve a abrir PowerShell.
 
-# ====== PASO 3: Mover el proyecto a Ubuntu ======
+# ====== PASO 3: Verificar instalacion ======
+wsl -d Ubuntu-24.04 whoami
+# Debe mostrar tu nombre de usuario (ej: antony_carranza)
+
+# ====== PASO 4: Mover el proyecto a Ubuntu ======
 cd C:\Z_Proyectos\AchoraoAgent
 cat app.py | wsl -d Ubuntu-24.04 -u root -- bash -c 'cat > /root/app.py'
 
-# ====== PASO 4: Preparar entorno e instalar dependencias de borrado ======
+# ====== PASO 5: Instalar dependencias del sistema y Python ======
 wsl -d Ubuntu-24.04 -u root -- bash -c '
   apt update
   apt install -y python3 python3-pip python3-venv python3-tk smartmontools hdparm nvme-cli
@@ -167,28 +182,43 @@ wsl -d Ubuntu-24.04 -u root -- bash -c '
   /root/venv/bin/pip install customtkinter pyinstaller
 '
 
-# ====== PASO 5: Compilar el Binario Unico Linux ======
+# ====== PASO 6: Compilar el Binario Unico Linux ======
 wsl -d Ubuntu-24.04 -u root -- bash -c '
   cd /root
   /root/venv/bin/pyinstaller --onefile --windowed --name nist-wiper app.py
 '
 
-# ====== PASO 6: Copiar el Binario de vuelta a Windows ======
+# ====== PASO 7: Copiar el Binario de vuelta a Windows ======
 wsl -d Ubuntu-24.04 -u root -- cp /root/dist/nist-wiper /mnt/c/Z_Proyectos/AchoraoAgent/
 ```
 
 #### Ejecucion Interactiva Real (Grafica)
 
-Cada vez que desees probar o ejecutar la aplicacion con permisos nativos de hardware en tu entorno virtual, hazlo desde tu **terminal de Ubuntu** (WSL):
+Abre la terminal de **Ubuntu** desde el menu inicio o con:
+
+```powershell
+wsl -d Ubuntu-24.04
+```
+
+Dentro de la terminal de Ubuntu, ejecuta:
 
 ```bash
-# Extrae la direccion IP del puente de Windows
+# Instalar herramientas X11 (si no estan)
+sudo apt update && sudo apt install x11-apps -y
+
+# Cambiar a root
+sudo su
+
+# Ir al directorio del binario
+cd /root/dist/
+
+# Extraer la direccion IP del puente de Windows
 export DISPLAY=$(ip route | awk '/^default/{print $3}'):0
 
-# Asigna permisos de ejecucion al binario (si no los tiene)
+# Asignar permisos de ejecucion (si no los tiene)
 chmod +x ./nist-wiper
 
-# Ejecuta la interfaz grafica interactiva heredando el servidor de video
+# Ejecutar la interfaz grafica
 sudo DISPLAY=$DISPLAY ./nist-wiper
 ```
 
