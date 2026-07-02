@@ -1,18 +1,16 @@
-# Build outputs
-bin/
-obj/
-publish/
-build_dll/
-build_probe/
-build_native/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+venv/
+.venv/
 
-# Native artifacts (no longer used)
-*.obj
-*.lib
-*.exp
-*.dll
-*.pdb
-*.ilk
+# PyInstaller output
+dist/nist-wiper
 
 # OS files
 Thumbs.db
@@ -22,3 +20,5 @@ Thumbs.db
 .vs/
 *.user
 *.suo
+.idea/
+*.swp
