@@ -232,6 +232,82 @@ wsl -d Ubuntu-24.04 -u root -- bash -c 'cd /root && rm -rf build dist *.spec && 
 wsl -d Ubuntu-24.04 -u root -- cp /root/dist/nist-wiper /mnt/c/Z_Proyectos/AchoraoAgent/
 ```
 
+#### Acceso a discos fisicos desde WSL2
+
+Por defecto, WSL2 NO puede ver discos USB ni discos internos de Windows. Hay dos metodos para pasar un disco fisico a WSL2.
+
+##### Metodo A: USB passthrough con usbipd-win (para discos USB externos)
+
+```powershell
+# ====== En PowerShell como Administrador ======
+
+# 1. Instalar usbipd-win (una sola vez)
+winget install usbipd
+
+# 2. Listar los dispositivos USB conectados
+usbipd wsl list
+# Identifica el BUSID de tu disco USB (ej: 1-3)
+
+# 3. Vincular el USB a WSL2
+usbipd wsl attach --busid <BUSID> --distribution Ubuntu-24.04
+# Ejemplo: usbipd wsl attach --busid 1-3 --distribution Ubuntu-24.04
+
+# 4. En la terminal de Ubuntu, el disco aparecera como /dev/sdX
+lsblk
+
+# 5. Cuando termines, desvincular desde PowerShell:
+usbipd wsl detach --busid <BUSID>
+```
+
+##### Metodo B: Montar disco fisico con wsl --mount (para discos internos SATA/NVMe)
+
+Este metodo desconecta el disco de Windows y lo pasa completo a WSL2.
+
+```powershell
+# ====== PASO 1: Identificar el disco en Windows ======
+# En PowerShell como Administrador:
+
+Get-Disk
+# Identifica el numero de disco (ej: Disco 1 - 256 GB)
+
+# ====== PASO 2: Desconectar el disco de Windows con DiskPart ======
+diskpart
+select disk 1          # Cambia 1 por el numero de tu disco
+offline disk
+exit
+
+# ====== PASO 3: Montar el disco en WSL2 ======
+wsl --mount \\.\PHYSICALDRIVE1 --bare
+# Cambia PHYSICALDRIVE1 por el numero correcto
+
+# ====== PASO 4: Verificar que WSL2 lo ve ======
+wsl -d Ubuntu-24.04 lsblk
+# Deberia aparecer como /dev/sdX
+
+# ====== PASO 5: Usar la app ======
+# Sigue los pasos de "Ejecucion Interactiva Real (Grafica)" de arriba
+```
+
+##### Devolver el disco a Windows (reversa)
+
+Cuando termines de usar el disco en WSL2, devuelvelo a Windows:
+
+```powershell
+# ====== PASO 1: Desmontar el disco de WSL2 ======
+# En PowerShell como Administrador:
+
+wsl --unmount \\.\PHYSICALDRIVE1
+# Cambia PHYSICALDRIVE1 por el numero correcto
+
+# ====== PASO 2: Volver a conectar el disco en Windows con DiskPart ======
+diskpart
+select disk 1          # Cambia 1 por el numero de tu disco
+online disk
+exit
+
+# El disco vuelve a aparecer en el Explorador de Windows.
+```
+
 ---
 
 ## Metodos de borrado soportados

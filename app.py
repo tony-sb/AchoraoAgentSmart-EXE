@@ -450,8 +450,12 @@ class SanitizerApp(ctk.CTk):
             meta = [("ata_erase", "ATA Secure Erase (NIST Purge)",
                 "hdparm --user-master u --security-set-pass p <device>\n"
                 "hdparm --user-master u --security-erase p <device>\n"
-                "ATENCION: La unidad no debe estar en estado 'frozen'.")]
-            note = "NIST Purge - ATA Secure Erase"
+                "ATENCION: La unidad no debe estar en estado 'frozen'."),
+                ("overwrite", "Overwrite 1-Pass (NIST Clear) [fallback]",
+                 "dd if=/dev/zero of=<device> bs=4M status=progress conv=fsync\n"
+                 "Alternativa cuando ATA Secure Erase no esta disponible\n"
+                 "(discos USB, WSL2, SCSI, o estado frozen).")]
+            note = "NIST Purge / Clear - ATA Secure Erase o sobrescritura"
         else:
             meta = [("overwrite", "Overwrite 1-Pass (NIST Clear)",
                 "dd if=/dev/zero of=<device> bs=4M status=progress\n"
@@ -658,10 +662,45 @@ class SanitizerApp(ctk.CTk):
             self._log(f"Error NVMe: {r.stderr.strip()}")
             return False
         self._log("NVMe Format completado exitosamente.")
+        subprocess.run(["sync"], timeout=30)
         self.after(0, lambda: self._prog_bar.set(1.0))
         return True
 
     def _exec_ata_erase(self, dev):
+        # Verificar si hdparm puede comunicarse con el dispositivo
+        check = subprocess.run(
+            ["hdparm", "-I", dev],
+            capture_output=True, text=True, timeout=15)
+        if check.returncode != 0:
+            err = check.stderr.strip() or check.stdout.strip()[:200]
+            self._log(f"hdparm -I fallo: {err}")
+            self._log("El dispositivo no responde a comandos ATA (posible SCSI/USB).")
+            self._log("Usa el metodo 'Overwrite 1-Pass [fallback]' en su lugar.")
+            self.after(0, lambda m=err: self._show_error_popup(
+                "ATA no disponible",
+                f"hdparm no puede comunicarse con este dispositivo.\n"
+                f"Posible causa: disco SCSI/USB sin soporte ATA.\n\n"
+                f"Usa el metodo 'Overwrite 1-Pass [fallback]'\n"
+                f"que ya esta disponible en el Paso 2.\n\n{err}"))
+            return False
+        # Verificar estado security
+        stdout_lower = check.stdout.lower()
+        if "not frozen" in stdout_lower:
+            self._log("Estado security: OK (not frozen)")
+        elif "frozen" in stdout_lower:
+            self._log("ESTADO FROZEN DETECTADO!")
+            self._log("La unidad tiene el security state 'frozen'.")
+            self._log("Sugerencia: suspende/reanuda el PC para descongelar,")
+            self._log("o usa el metodo 'Overwrite 1-Pass [fallback]' en su lugar.")
+            self.after(0, lambda: self._show_error_popup(
+                "Unidad frozen",
+                "La unidad esta en estado 'frozen'.\n"
+                "ATA Secure Erase no funcionara.\n\n"
+                "Soluciones:\n"
+                "1. Suspender (Sleep) y reanudar el PC\n"
+                "2. Usar 'Overwrite 1-Pass [fallback]'\n"
+                "3. Si es NVMe, conectarlo directamente (no USB)"))
+            return False
         self._log("Paso 1/2: Estableciendo contrasena temporal ATA...")
         self.after(0, lambda: self._prog_label.configure(text="Estableciendo contrasena ATA..."))
         self.after(0, lambda: self._prog_bar.configure(mode="indeterminate"))
@@ -685,11 +724,12 @@ class SanitizerApp(ctk.CTk):
             self._log(f"Error ATA erase: {r2.stderr.strip()}")
             return False
         self._log("ATA Secure Erase completado.")
+        subprocess.run(["sync"], timeout=30)
         self.after(0, lambda: self._prog_bar.set(1.0))
         return True
 
     def _exec_dd(self, dev):
-        cmd = ["dd", "if=/dev/zero", f"of={dev}", "bs=4M", "status=progress"]
+        cmd = ["dd", "if=/dev/zero", f"of={dev}", "bs=4M", "status=progress", "conv=fsync"]
         self._log(f"Ejecutando: {' '.join(cmd)}")
         self.after(0, lambda: self._prog_bar.configure(mode="determinate"))
         self.after(0, lambda: self._prog_bar.set(0))
@@ -737,6 +777,8 @@ class SanitizerApp(ctk.CTk):
             self._log(f"dd termino con codigo {proc.returncode}.")
             return False
         self._log("Sobrescritura completada exitosamente.")
+        # Forzar sync del kernel para que la verificacion lea datos frescos
+        subprocess.run(["sync"], timeout=30)
         self.after(0, lambda: self._prog_bar.set(1.0))
         return True
 
@@ -772,31 +814,51 @@ class SanitizerApp(ctk.CTk):
         self.after(0, lambda: self._prog_bar.configure(mode="indeterminate"))
         self.after(0, lambda: self._prog_bar.start())
         try:
+            # Forzar sync antes de leer para evitar cache
+            subprocess.run(["sync"], timeout=30)
+            # Obtener tamano en sectores
             r = subprocess.run(["blockdev", "--getsz", dev],
                 capture_output=True, text=True, timeout=10)
             if r.returncode != 0:
                 raise RuntimeError("No se pudo obtener tamano del dispositivo")
             total_sectors = int(r.stdout.strip())
-            self._log("Leyendo primeros sectores...")
+            self._log(f"Total sectores: {total_sectors}")
+            # Leer primeros sectores (sin cache)
+            self._log("Leyendo primeros sectores (directo)...")
             first = subprocess.run(
-                ["dd", f"if={dev}", "bs=512", "count=10", "status=none"],
+                ["dd", f"if={dev}", "bs=512", "count=10", "status=none", "iflag=nocache"],
                 capture_output=True, timeout=30)
             if first.returncode != 0:
-                raise RuntimeError("Error leyendo inicio del dispositivo")
+                # Fallback sin iflag=nocache
+                first = subprocess.run(
+                    ["dd", f"if={dev}", "bs=512", "count=10", "status=none"],
+                    capture_output=True, timeout=30)
+                if first.returncode != 0:
+                    raise RuntimeError("Error leyendo inicio del dispositivo")
             skip_s = max(total_sectors - 10, 0)
             self._log(f"Leyendo ultimos sectores (sector {skip_s})...")
             last = subprocess.run(
                 ["dd", f"if={dev}", "bs=512", "count=10",
-                 f"skip={skip_s}", "status=none"],
+                 f"skip={skip_s}", "status=none", "iflag=nocache"],
                 capture_output=True, timeout=30)
             if last.returncode != 0:
-                raise RuntimeError("Error leyendo final del dispositivo")
-            first_ok = all(b == 0 for b in first.stdout)
-            last_ok = all(b == 0 for b in last.stdout)
+                last = subprocess.run(
+                    ["dd", f"if={dev}", "bs=512", "count=10",
+                     f"skip={skip_s}", "status=none"],
+                    capture_output=True, timeout=30)
+                if last.returncode != 0:
+                    raise RuntimeError("Error leyendo final del dispositivo")
+            # Verificar bytes
+            first_nonzero = [b for b in first.stdout if b != 0]
+            last_nonzero = [b for b in last.stdout if b != 0]
+            first_ok = len(first_nonzero) == 0
+            last_ok = len(last_nonzero) == 0
             self.after(0, lambda: self._prog_bar.stop())
             self.after(0, lambda: self._prog_bar.configure(mode="determinate"))
             if first_ok and last_ok:
                 self._log("VERIFICACION EXITOSA: Todos los sectores contienen ceros.")
+                self._log(f"  - Primeros 10 sectores (5120 bytes): OK (todo ceros)")
+                self._log(f"  - Ultimos 10 sectores (5120 bytes): OK (todo ceros)")
                 self.after(0, lambda: self._prog_bar.set(1.0))
                 self.after(0, lambda: self._prog_label.configure(
                     text="VERIFICACION EXITOSA - Disco sanitizado correctamente",
@@ -804,6 +866,10 @@ class SanitizerApp(ctk.CTk):
                 self.verification_passed = True
             else:
                 self._log("VERIFICACION FALLIDA: Datos residuales detectados.")
+                if not first_ok:
+                    self._log(f"  - PRIMEROS sectores: {len(first_nonzero)} bytes no-cero encontrados")
+                if not last_ok:
+                    self._log(f"  - ULTIMOS sectores: {len(last_nonzero)} bytes no-cero encontrados")
                 self.after(0, lambda: self._prog_label.configure(
                     text="VERIFICACION FALLIDA - Datos residuales",
                     text_color=self.COL_DANGER))
